@@ -50,6 +50,7 @@ from paddle.distributed.fleet.meta_parallel import (
     PipelineDatasetPreprocessor,
     PipelineLayer,
 )
+from paddle.distributed.fsdp.fully_shard import fully_shard
 
 from ..utils.import_utils import is_paddlefleet_available
 
@@ -388,7 +389,8 @@ class Trainer:
 
                 # Process basic API.
                 else:
-                    raise ValueError("Auto parallel only support basic API now.")
+                    self.auto_dist_config = None
+                    # raise ValueError("Auto parallel only support basic API now.")
 
                 self.global_mesh = fleet.auto.get_mesh()
                 self.comm_group_in_pp = fleet.get_hybrid_communicate_group().get_pipe_parallel_group()
@@ -1389,10 +1391,10 @@ class Trainer:
         # Do nothing when not in auto parallel mode.
         if not self.args.enable_auto_parallel:
             return
-        self.optimizer = parallelize.parallelize_optimizer(
-            self.optimizer,
-            config=self.auto_dist_config,
-        )
+        # self.optimizer = parallelize.parallelize_optimizer(
+        #     self.optimizer,
+        #     config=self.auto_dist_config,
+        # )
         if hasattr(self.optimizer, "_enable_tensor_fusion") and self.args.tensor_fusion:
             self.optimizer._enable_tensor_fusion()
         if hasattr(self.optimizer, "_enable_sharding_overlap") and self.args.overlap:
@@ -1423,6 +1425,8 @@ class Trainer:
                 A list of keys in the output of your model (if it is a dictionary) that should be ignored when
                 gathering predictions for evaluation during the training.
         """
+        if self.args.enable_auto_parallel:
+            dist.enable_auto_dp()
         args = self.args
         self.is_in_train = True
 
@@ -1477,6 +1481,8 @@ class Trainer:
             if self.args.fp16 or self.args.bf16:
                 self._wrap_amp_model(self.args, model)
 
+            # use FSDP in auto_parallel
+            model = fully_shard(model, mesh=self.global_mesh)
         if model is not self.model:
             self.model_wrapped = model
 
@@ -1559,7 +1565,7 @@ class Trainer:
             per_device_trainable_numel = 0
             for p in model.parameters():
                 if not p.stop_gradient:
-                    per_device_trainable_numel += np.prod(p._local_shape) if p.is_dist() else np.prod(p.shape)
+                    per_device_trainable_numel += np.prod(p.shape) if p.is_dist() else np.prod(p.shape)
         else:
             per_device_trainable_numel = sum(np.prod(p.shape) for p in model.parameters() if not p.stop_gradient)
         logger.debug(f"  Number of trainable parameters = {per_device_trainable_numel:,} (per device)")
@@ -1772,7 +1778,7 @@ class Trainer:
     def _get_inputs_list(self, inputs):
         inputs_list = [inputs]
         if self.args.enable_auto_parallel:
-            inputs_list = self._split_batches_for_accumulation(inputs)
+            # inputs_list = self._split_batches_for_accumulation(inputs)
             for inputs in inputs_list:
                 if self.args.sep_parallel_size > 1 and self.args.split_inputs_sequence_dim:
                     inputs = auto_split_inputs_sequence_dim(inputs)
@@ -1939,8 +1945,8 @@ class Trainer:
                 # for paddleformers.utils.batch_sampler.DistributedBatchSampler
                 # We use consumed_samples to reset the status
                 dataloader = train_dataloader
-                if self.args.enable_auto_parallel:
-                    dataloader = train_dataloader._dataloader
+                # if self.args.enable_auto_parallel:
+                #     dataloader = train_dataloader._dataloader
 
                 if isinstance(dataloader, paddle.io.DataLoader) and isinstance(
                     dataloader.batch_sampler, NlpDistributedBatchSampler
@@ -2065,7 +2071,6 @@ class Trainer:
                                 tr_loss_step = self.training_step(model, inputs)
                     else:
                         tr_loss_step = self.training_step(model, inputs)
-
                     if self.args.enable_auto_parallel:
                         with _exec_mode_guard("dynamic"):
                             tr_loss += tr_loss_step
@@ -2609,10 +2614,14 @@ class Trainer:
 
         additional_configs = {}
         if is_iterable_dataset:  # For iterable dataset
+            total_batch_size = self.args.per_device_train_batch_size
+            if self.args.enable_auto_parallel:
+                total_batch_size = total_batch_size * self.args.dataset_world_size
+            print("total_batch_size:", total_batch_size)
             if self.args.dataset_world_size > 1 and train_dataset is not None:
                 train_dataset = IterableDatasetShard(
                     train_dataset,
-                    batch_size=self.args.per_device_train_batch_size,
+                    batch_size=total_batch_size,
                     drop_last=self.args.dataloader_drop_last,
                     num_processes=self.args.dataset_world_size,
                     process_index=self.args.dataset_rank,
@@ -2623,7 +2632,7 @@ class Trainer:
                 additional_configs = {"is_iterable_dataset": True, "pp_data_group": self._pp_data_group}
             train_dataloader = _DataLoader(
                 train_dataset,
-                batch_size=self.args.per_device_train_batch_size,
+                batch_size=total_batch_size,
                 collate_fn=self.data_collator,
                 num_workers=self.args.dataloader_num_workers,
                 persistent_workers=self.args.dataloader_num_workers > 0,
@@ -3131,9 +3140,10 @@ class Trainer:
             # use callback for sp grad sync in case of unexpected behaviour (except sharding stage 2&3)
             if ShardingOption.SHARD_GRAD_OP in self.args.sharding or ShardingOption.FULL_SHARD in self.args.sharding:
                 # stage 2 or stage 3
-                register_sequence_parallel_allreduce_hooks(
-                    model, self.args.gradient_accumulation_steps, self.args.fuse_sequence_parallel_allreduce
-                )
+                if not self.args.enable_auto_parallel:
+                    register_sequence_parallel_allreduce_hooks(
+                        model, self.args.gradient_accumulation_steps, self.args.fuse_sequence_parallel_allreduce
+                    )
             else:
                 # stage 1 or dp
                 self.add_callback(SPGradSyncCallback(model))

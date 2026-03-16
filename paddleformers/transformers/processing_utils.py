@@ -27,7 +27,9 @@ from pathlib import Path
 from typing import Annotated, Any, Optional, TypedDict, Union
 
 import numpy as np
-from transformers.processing_utils import AUTO_TO_BASE_CLASS_MAPPING
+from transformers.processing_utils import (
+    MODALITY_TO_BASE_CLASS_MAPPING as AUTO_TO_BASE_CLASS_MAPPING,
+)
 from transformers.processing_utils import (
     AllKwargsForChatTemplate as AllKwargsForChatTemplate_hf,
 )

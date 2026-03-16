@@ -16,7 +16,7 @@
 
 import paddle.distributed.communication.deep_ep as deep_ep
 
-HAVE_DEEP_EP = True
+HAVE_DEEP_EP = False
 
 import paddle
 from paddle.autograd import PyLayer
