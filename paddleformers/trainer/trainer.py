@@ -244,6 +244,26 @@ OPTIMIZER_NAME = "optimizer"
 DIST_CKPT_PATH = "dist_ckpt"
 DIST_MODEL_PATH = "dist_model"
 
+ACC = 4  # 根据实际设置的acc 来
+NVTX_STEP = 5
+NVTX_STEP_TOTAL = 3
+
+
+def start_nvtx(step):
+    return step == NVTX_STEP * ACC
+
+
+def pop_and_push_nvtx(step):
+    for i in range(NVTX_STEP_TOTAL):
+        if step == (NVTX_STEP + i + 1) * ACC:
+            return True
+    return False
+    return step == (NVTX_STEP + 1) * ACC or step == (NVTX_STEP + 2) * ACC
+
+
+def stop_nvtx(step):
+    return step == (NVTX_STEP + NVTX_STEP_TOTAL + 1) * ACC
+
 
 class Trainer:
     """
@@ -2027,6 +2047,19 @@ class Trainer:
 
                     self.timers and self.timers("read-data").start()
                     continue
+
+                if start_nvtx(step):
+                    core.nvprof_start()
+                    core.nvprof_enable_record_event()
+                    core.nvprof_nvtx_push(f"LYM hand g_step {self.state.global_step} step {step}")
+
+                if pop_and_push_nvtx(step):
+                    core.nvprof_nvtx_pop()
+                    core.nvprof_nvtx_push(f"LYM hand g_step {self.state.global_step} step {step}")
+
+                if stop_nvtx(step):
+                    core.nvprof_nvtx_pop()
+                    core.nvprof_stop()
 
                 for inputs in inputs_list:
                     if step_control % args.gradient_accumulation_steps == 0:
