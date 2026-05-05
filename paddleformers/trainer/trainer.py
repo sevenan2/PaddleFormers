@@ -1953,6 +1953,27 @@ class Trainer:
 
         self.control = self.callback_handler.on_train_begin(args, self.state, self.control)
 
+        # === 精度对齐：注册 forward hooks ===
+        # 使用方式：设置环境变量 ENABLE_SAVE_HOOK=1 启用
+        if os.environ.get("ENABLE_SAVE_HOOK", "0") == "1":
+            sys.path.insert(0, "/root/paddlejob/share-storage/gpfs/system-public/dengsiwei02/tensor_debug")
+            from save_tensor_paddle import enable_save_hook, register_all_hooks
+
+            enable_save_hook()
+            # 为所有叶子模块注册 hook (layer_types=None 表示所有叶子模块)
+            self._save_hooks = register_all_hooks(
+                model,
+                layer_types=None,  # None 表示注册所有叶子模块
+                subdir="forward_hooks",
+                save_input=True,
+                save_output=True,
+                save_grad=False,
+            )
+            logger.info(
+                "精度对齐 hooks 已注册，保存目录: /root/paddlejob/share-storage/gpfs/system-public/dengsiwei02/tensor_debug/pf"
+            )
+        # === 精度对齐结束 ===
+
         tr_loss = paddle.to_tensor(0.0)
         self._total_loss_scalar = 0.0
         self._globalstep_last_logged = self.state.global_step
@@ -1998,6 +2019,50 @@ class Trainer:
                         enable_layerwise_event=True,
                     )
                 os.environ["TRAINER_GLOBAL_STEP"] = str(self.state.global_step)
+
+                # === 权重对齐 X光 ===
+                import hashlib
+
+                cur_global_step = int(os.environ["TRAINER_GLOBAL_STEP"]) + 1
+
+                if paddle.distributed.get_rank() == 0 and cur_global_step <= 1:
+                    log_dir = "/root/paddlejob/share-storage/gpfs/system-public/dengsiwei02/tensor_debug/pf"
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_file = os.path.join(log_dir, "weights_md5.log")
+                    with open(log_file, "w") as f:
+                        f.write("\n" + "=" * 20 + " [Paddle 初始权重] " + "=" * 20 + "\n")
+                        for name, param in model.named_parameters():
+                            p = param.numpy()
+                            if p.dtype == np.uint16:
+                                p = param.astype("float32").numpy()
+                            else:
+                                p = p.astype(np.float32)
+                            md5 = hashlib.md5(p.tobytes()).hexdigest()
+                            norm_val = float(np.linalg.norm(p))
+                            line = f"[Paddle] {name} | md5: {md5} | sum: {p.sum()} | norm: {norm_val:.6f} | shape: {p.shape} | dtype: {param.dtype}\n"
+                            f.write(line)
+                            print(line, end="")
+                        f.write("=" * 61 + "\n")
+                    print(f"[Paddle] 权重信息已保存到: {log_file}")
+
+                    # === 打印模型结构 ===
+                    structure_file = os.path.join(log_dir, "model_structure.log")
+                    with open(structure_file, "w") as f:
+                        f.write("\n" + "=" * 20 + " [Paddle 模型结构] " + "=" * 20 + "\n\n")
+                        for name, module in model.named_sublayers():
+                            module_type = type(module).__name__
+                            params_info = ""
+                            if hasattr(module, "weight") and module.weight is not None:
+                                params_info += f" | weight: {tuple(module.weight.shape)}"
+                            if hasattr(module, "bias") and module.bias is not None:
+                                params_info += f" | bias: {tuple(module.bias.shape)}"
+                            line = f"{name} ({module_type}){params_info}\n"
+                            f.write(line)
+                        f.write("\n" + "=" * 60 + "\n")
+                    print(f"[Paddle] 模型结构已保存到: {structure_file}")
+                    # === 模型结构结束 ===
+                # === 权重对齐 X光 结束 ===
+
                 self.callback_handler.on_load_data_end(args, self.state, self.control, inputs=inputs)
 
                 # Skip past any already trained steps if resuming training
@@ -3657,6 +3722,26 @@ class Trainer:
 
         model.train()
         inputs = self._prepare_inputs(inputs)
+
+        # === 固定输入用于精度对齐 ===
+        if os.environ.get("USE_FIXED_INPUT", "0") == "1":
+            sys.path.insert(0, "/root/paddlejob/share-storage/gpfs/system-public/dengsiwei02")
+            from fixed_input import get_fixed_tokens
+
+            fixed_tokens = get_fixed_tokens()
+            # 替换 input_ids
+            if "input_ids" in inputs:
+                original_shape = inputs["input_ids"].shape
+                # 使用固定 tokens 填充到原始 shape
+                repeated_tokens = np.tile(fixed_tokens, (original_shape.numel() // len(fixed_tokens) + 1))[
+                    : original_shape.numel()
+                ]
+                inputs["input_ids"] = paddle.to_tensor(
+                    repeated_tokens.reshape(original_shape), dtype=inputs["input_ids"].dtype
+                )
+                print(f"[PF] 已替换 input_ids 为固定输入, shape={inputs['input_ids'].shape}")
+        # === 固定输入结束 ===
+
         with self.autocast_smart_context_manager():
             loss = self.compute_loss(model, inputs)
 
@@ -3711,6 +3796,22 @@ class Trainer:
                 return paddle.zeros([])
 
         model.train()
+
+        # # === 固定输入用于精度对齐 ===
+        # if os.environ.get("USE_FIXED_INPUT", "0") == "1":
+        #     sys.path.insert(0, "/root/paddlejob/share-storage/gpfs/system-public/dengsiwei02")
+        #     from fixed_input import get_fixed_tokens
+        #     fixed_tokens = get_fixed_tokens()
+        #     # 替换 _pp_data_buffer 中的 input_ids
+        #     for i, data in enumerate(self._pp_data_buffer):
+        #         if "input_ids" in data:
+        #             original_shape = data["input_ids"].shape
+        #             # 使用固定 tokens 填充到原始 shape
+        #             repeated_tokens = np.tile(fixed_tokens, (original_shape.numel() // len(fixed_tokens) + 1))[:original_shape.numel()]
+        #             self._pp_data_buffer[i]["input_ids"] = paddle.to_tensor(repeated_tokens.reshape(original_shape), dtype=data["input_ids"].dtype)
+        #             print(f"[PF-PP] 已替换 input_ids 为固定输入, batch={i}, shape={self._pp_data_buffer[i]['input_ids'].shape}")
+        # # === 固定输入结束 ===
+
         if model._dp_comm_overlap or model._sharding_comm_overlap:
             for _, buffers in model._chunk_2_comm_buffers.items():
                 for buffer in buffers:

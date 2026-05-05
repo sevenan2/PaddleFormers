@@ -68,7 +68,7 @@ class KimiK2PretrainedModel(PretrainedModel):
         # layer 0 config.first_k_dense_replace
         aoa_config["aoa_statements"] += [
             "model.layers.0.mlp.down_proj.weight^T -> model.layers.0.mlp.down_proj.weight",
-            "model.layers.0.mlp.gate_proj.weight^T ,model.layers.0.mlp.up_proj.weight^T ->  model.layers.0.mlp.up_gate_proj.weight, axis=1",
+            "model.layers.0.mlp.gate_proj.weight^T ,model.layers.0.mlp.up_proj.weight^T ->  model.layers.0.mlp.up_gate_proj.weight, fused_ffn",
         ]
 
         # layer 1 -> num_hidden_layers
@@ -76,7 +76,7 @@ class KimiK2PretrainedModel(PretrainedModel):
             for expert_id in range(config.n_routed_experts):
                 aoa_config["aoa_statements"] += [
                     f"model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight^T -> model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight",
-                    f"model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight^T, model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight^T -> model.layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight, axis=1",
+                    f"model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight^T, model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight^T -> model.layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight, fused_ffn",
                 ]
             aoa_config["aoa_statements"] += [
                 f"model.layers.{layer_id}.mlp.gate.weight -> model.layers.{layer_id}.mlp.gate.weight, src_dtype='bfloat16',dst_dtype='float32'",
